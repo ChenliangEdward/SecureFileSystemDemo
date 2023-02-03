@@ -7,7 +7,6 @@ package client
 
 import (
 	"encoding/json"
-
 	userlib "github.com/cs161-staff/project2-userlib"
 	"github.com/google/uuid"
 
@@ -100,8 +99,13 @@ func someUsefulThings() {
 // A Go struct is like a Python or Java class - it can have attributes
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
 type User struct {
-	Username string
-
+	Username      string
+	PasswordHash  []byte
+	SymEncKeyUser []byte              // User's Symmetric Encryption key, used to encrypt the user structure
+	PrivKeyMaster userlib.PKEDecKey   // User's Main Private key (decryption)
+	PubKeyMaster  userlib.PKEEncKey   // User's Main Public Key (encryption)
+	DigiSignSign  userlib.DSSignKey   // User's Digital Signature Signing key (private key)
+	DigiSignVeri  userlib.DSVerifyKey // User's Digital Signature Verifying key (public key)
 	// You can add other attributes here if you want! But note that in order for attributes to
 	// be included when this struct is serialized to/from JSON, they must be capitalized.
 	// On the flipside, if you have an attribute that you want to be able to access from
@@ -113,13 +117,73 @@ type User struct {
 // NOTE: The following methods have toy (insecure!) implementations.
 
 func InitUser(username string, password string) (userdataptr *User, err error) {
+	userUuid, err := uuid.FromBytes([]byte(username))
+	if err != nil {
+		return nil, err
+	}
+	_, check := userlib.DatastoreGet(userUuid)
+	if check == true {
+		return nil, err
+	} // if user exists, abort
+
 	var userdata User
 	userdata.Username = username
+	userdata.PasswordHash = userlib.Hash([]byte(password))
+	userdata.SymEncKeyUser = userlib.Argon2Key([]byte(password), []byte(username), 16)
+
+	userdata.PubKeyMaster.KeyType = "PubKey"
+	userdata.PrivKeyMaster.KeyType = "PrivKey"
+	userdata.PubKeyMaster, userdata.PrivKeyMaster, err = userlib.PKEKeyGen()
+	if err != nil {
+		return nil, err
+	}
+	userdata.DigiSignSign, userdata.DigiSignVeri, err = userlib.DSKeyGen()
+	if err != nil {
+		return nil, err
+	}
+	userStructPlain, err := json.Marshal(userdata)
+	if err != nil {
+		return nil, err
+	}
+
+	userStructEnc := userlib.SymEnc(userdata.SymEncKeyUser, userlib.RandomBytes(16), userStructPlain)
+	// This is the struct that goes to the DataStore
+
+	userStructSig, err := userlib.DSSign(userdata.DigiSignSign, userStructEnc)
+	if err != nil {
+		return nil, err
+	}
+
+	userlib.DatastoreSet(userUuid, append(userStructEnc, userStructSig...))
+	err = userlib.KeystoreSet(username+"DS", userdata.DigiSignVeri)
+	if err != nil {
+		return nil, err
+	}
+	err = userlib.KeystoreSet(username+"PK", userdata.PubKeyMaster)
+	if err != nil {
+		return nil, err
+	}
 	return &userdata, nil
 }
 
 func GetUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
+	userUuid, err := uuid.FromBytes([]byte(username))
+	if err != nil {
+		return nil, err
+	}
+	userdataEncSigned, check := userlib.DatastoreGet(userUuid)
+	if check == false {
+		return nil, err
+	}
+	digiSignVeri, check := userlib.KeystoreGet(username + "DS") // Get the digital signature verification key
+	if check == false {
+		return nil, err
+	}
+	userStructSig := userdataEncSigned[len(userdataEncSigned)-256 : len(userdataEncSigned)] // Get the last 256 bit signature
+	userStructEnc := userdataEncSigned[0 : len(userdataEncSigned)-256]                      // Get the Encrypted Data structure part
+	err = userlib.DSVerify(digiSignVeri, userStructEnc, userStructSig)
+
 	userdataptr = &userdata
 	return userdataptr, nil
 }
