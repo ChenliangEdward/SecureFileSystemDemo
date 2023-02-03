@@ -6,6 +6,7 @@ package client
 // may break the autograder!
 
 import (
+	"bytes"
 	"encoding/json"
 	userlib "github.com/cs161-staff/project2-userlib"
 	"github.com/google/uuid"
@@ -168,23 +169,53 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 
 func GetUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
+	userlib.DebugMsg(">> Getting UUID from username\n")
 	userUuid, err := uuid.FromBytes([]byte(username))
 	if err != nil {
+		userlib.DebugMsg("!! Cannot compute UUID from username\n")
 		return nil, err
 	}
+	userlib.DebugMsg(">> Getting Sign&Enc userdata from Datastore\n")
 	userdataEncSigned, check := userlib.DatastoreGet(userUuid)
 	if check == false {
+		userlib.DebugMsg("!! Cannot get userdata from Datastore!\n")
 		return nil, err
 	}
+
+	userlib.DebugMsg(">> Get the Digital Signature Verification Key from KeyStore\n")
 	digiSignVeri, check := userlib.KeystoreGet(username + "DS") // Get the digital signature verification key
 	if check == false {
+		userlib.DebugMsg("!! Cannot retrieve user's signature verification key!\n")
 		return nil, err
 	}
+	userlib.DebugMsg(">> Splitting the userdata to get Enc and Signature\n")
 	userStructSig := userdataEncSigned[len(userdataEncSigned)-256 : len(userdataEncSigned)] // Get the last 256 bit signature
 	userStructEnc := userdataEncSigned[0 : len(userdataEncSigned)-256]                      // Get the Encrypted Data structure part
+
+	userlib.DebugMsg(">> Verify the user signature\n")
 	err = userlib.DSVerify(digiSignVeri, userStructEnc, userStructSig)
+	if err != nil {
+		userlib.DebugMsg("!! Signature verification failed\n")
+		return nil, err
+	}
+
+	// After we verify the signature, we decrypt the message
+	// get the symmetric enc key from pbkdf first
+	symEncKeyUser := userlib.Argon2Key([]byte(password), []byte(username), 16)
+	userStruct := userlib.SymDec(symEncKeyUser, userStructEnc)
+	err = json.Unmarshal(userStruct, &userdata) // Get userStructure from the
+	if err != nil {
+		userlib.DebugMsg("!! Cannot Unmarshal userStruct\n")
+		return nil, err
+	}
+
+	if bytes.Compare(userlib.Hash([]byte(password)), userdata.PasswordHash) != 0 {
+		userlib.DebugMsg("!! Password isn't matching!\n")
+		return nil, err
+	}
 
 	userdataptr = &userdata
+	userlib.DebugMsg(">> Getting User Successful\n")
 	return userdataptr, nil
 }
 
