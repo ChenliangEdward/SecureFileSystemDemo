@@ -96,7 +96,7 @@ func someUsefulThings() {
 	_ = fmt.Sprintf("%s_%d", "file", 1)
 }
 
-// This is the type definition for the User struct.
+// User This is the type definition for the User struct.
 // A Go struct is like a Python or Java class - it can have attributes
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
 type User struct {
@@ -107,12 +107,28 @@ type User struct {
 	PubKeyMaster  userlib.PKEEncKey   // User's Main Public Key (encryption)
 	DigiSignSign  userlib.DSSignKey   // User's Digital Signature Signing key (private key)
 	DigiSignVeri  userlib.DSVerifyKey // User's Digital Signature Verifying key (public key)
+	Myfiles       []string            // Files that the user created
+	SharedWithMe  []string            // Files that shared with me
 	// You can add other attributes here if you want! But note that in order for attributes to
+	// Concatenate e fileHeader to the beginning of the content
 	// be included when this struct is serialized to/from JSON, they must be capitalized.
 	// On the flipside, if you have an attribute that you want to be able to access from
 	// this struct's methods, but you DON'T want that value to be included in the serialized value
 	// of this struct that's stored in datastore, then you can use a "private" variable (e.g. one that
 	// begins with a lowercase letter).
+}
+
+type FileMeta struct {
+	Filename   string
+	FileArray  []userlib.UUID
+	FileEncKey []byte
+	Owner      string  // The owner of the File
+	SharedWith *string // The Tree Structure of the sharing tree
+}
+
+type File struct {
+	Content   []byte // The content of the File
+	Signature []byte // T
 }
 
 // NOTE: The following methods have toy (insecure!) implementations.
@@ -245,6 +261,24 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
+	// Check if the User has already had the file
+	overwrite := false
+	for _, file := range userdata.Myfiles {
+		if file == filename {
+			overwrite = true
+		}
+	}
+	for _, file := range userdata.SharedWithMe {
+		if file == filename {
+			overwrite = true
+		}
+	}
+
+	// TODO: File overwrite logic here
+	if overwrite {
+		return
+	}
+
 	userlib.DebugMsg("StoreFile >> Generating UUID for File Storage\n")
 	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + "\\" + userdata.Username))[:16])
 	if err != nil {
@@ -252,14 +286,16 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		return err
 	}
 
-	fileHeader := "AAAABBBBCCCCDDDD"
-
-	contentBytes, err := json.Marshal(content)
-	if err != nil {
-		userlib.DebugMsg("StoreFile !! Cannot marshal file content\n")
+	// Checking if the storagekey exists
+	_, ok := userlib.DatastoreGet(storageKey)
+	if ok == true {
+		userlib.DebugMsg("StoreFile !! Same Storage key found!\n")
 		return err
 	}
-	userlib.DatastoreSet(storageKey, contentBytes)
+	var newfile File
+	var newFileMeta FileMeta
+	newfile.Content = content
+
 	return
 }
 
