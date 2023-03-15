@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	userlib "github.com/cs161-staff/project2-userlib"
 	"github.com/google/uuid"
-
 	// hex.EncodeToString(...) is useful for converting []byte to string
 
 	// Useful for string manipulation
@@ -96,6 +95,16 @@ func someUsefulThings() {
 	_ = fmt.Sprintf("%s_%d", "file", 1)
 }
 
+func signAppend(content []byte, key userlib.DSSignKey) (result []byte, err error) {
+	result = content
+	sig, err := userlib.DSSign(key, content)
+	if err != nil {
+		return nil, err
+	}
+	result = append(result, sig...)
+	return result, nil
+}
+
 // User This is the type definition for the User struct.
 // A Go struct is like a Python or Java class - it can have attributes
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
@@ -127,9 +136,10 @@ type FileMeta struct {
 }
 
 type File struct {
-	Content   []byte // The content of the File
-	Signature []byte // T
+	Content []byte // The content of the File
 }
+
+// Struct
 
 // NOTE: The following methods have toy (insecure!) implementations.
 
@@ -292,9 +302,53 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		userlib.DebugMsg("StoreFile !! Same Storage key found!\n")
 		return err
 	}
-	var newfile File
+	//var newfile File
 	var newFileMeta FileMeta
-	newfile.Content = content
+	// generate new uuid for file storage
+	fileUUID, err := uuid.FromBytes([]byte(filename))
+	if err != nil {
+		userlib.DebugMsg("StoreFile !! Cannot generate UUID from filename\n")
+		return err
+	}
+	newFileMeta.Filename = filename
+	newFileMeta.FileArray = append(newFileMeta.FileArray, fileUUID)
+	symKey := userlib.RandomBytes(16) // Generate Symmetric encrytion key
+	newFileMeta.FileEncKey = symKey
+	newFileMeta.Owner = userdata.Username
+	// Update the userdata
+	userdata.Myfiles = append(userdata.Myfiles, filename)
+	newUserBytes, err := json.Marshal(userdata)
+	if err != nil {
+		userlib.DebugMsg("!! Json Marshal Error!\n")
+		return err
+	}
+	uuidCalc, err := uuid.FromBytes([]byte(userdata.Username))
+	if err != nil {
+		userlib.DebugMsg("!! Cannot calculate UUID!\n")
+		return err
+	}
+	newUserBytesSigned, err := signAppend(newUserBytes, userdata.DigiSignSign)
+	if err != nil {
+		userlib.DebugMsg("StoreFile !! Cannot sign newUserByte\n")
+		return err
+	}
+	userlib.DatastoreSet(uuidCalc, newUserBytesSigned)
+	// Encrypt Files
+	contentEnc := userlib.SymEnc(symKey, userlib.RandomBytes(16), content)
+	// Sign the Files
+	contentEncSigned, err := signAppend(contentEnc, userdata.DigiSignSign)
+	if err != nil {
+		userlib.DebugMsg("StoreFile !! Cannot sign content!\n")
+		return err
+	}
+	// upload file to Datastore
+	userlib.DatastoreSet(fileUUID, contentEncSigned)
+	// upload metadata
+	metaUUID, err := uuid.FromBytes([]byte(filename + "_meta"))
+	if err != nil {
+		userlib.DebugMsg("StoreFile !! Cannot generate metaUUID\n")
+		return err
+	}
 
 	return
 }
