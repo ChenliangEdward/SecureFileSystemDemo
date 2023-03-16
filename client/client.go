@@ -106,6 +106,18 @@ func signAppend(content []byte, key userlib.DSSignKey) (result []byte, err error
 	return result, nil
 }
 
+func detachVerify(content []byte, key userlib.DSVerifyKey) (result []byte, err error) {
+	sig := content[len(content)-256:]
+	result = content[0 : len(content)-256]
+	err = userlib.DSVerify(key, result, sig)
+	if err != nil {
+		userlib.DebugMsg("detachVerify !! Cannot Verify signature")
+		return nil, err
+	}
+	return result, nil
+
+}
+
 func marshalEncrypt(plaintext interface{}, key []byte) (ciphertext []byte, err error) {
 	marshaled, err := json.Marshal(plaintext)
 	if err != nil {
@@ -116,19 +128,46 @@ func marshalEncrypt(plaintext interface{}, key []byte) (ciphertext []byte, err e
 	return marshaledEnced, nil
 }
 
+func decryptUnmarshal(ciphertext []byte, key []byte) (plaintext FileMeta, err error) {
+	marshaled := userlib.SymDec(key, ciphertext)
+	err = json.Unmarshal(marshaled, &plaintext)
+	if err != nil {
+		userlib.DebugMsg("decryptUnmarshal !! Cannot unmarshal\n")
+		return FileMeta{}, err
+	}
+	return plaintext, nil
+}
+
+func encSignUploadFile(content []byte) (fileUUID uuid.UUID, symKey []byte, err error) {
+	fileUUID = uuid.New()
+	// Encrypt Files
+	symKey = userlib.RandomBytes(16) // Generate Symmetric encrytion key for Files
+	contentEnc := userlib.SymEnc(symKey, userlib.RandomBytes(16), content)
+	// Sign the Files
+	sum, err := userlib.HMACEval(symKey, contentEnc)
+	contentEncSigned := append(contentEnc, sum...)
+	if err != nil {
+		userlib.DebugMsg("encSignUploadFile !! Cannot sign content!\n")
+		return fileUUID, nil, err
+	}
+	// upload file to Datastore
+	userlib.DatastoreSet(fileUUID, contentEncSigned)
+	return fileUUID, symKey, err
+}
+
 // User This is the type definition for the User struct.
 // A Go struct is like a Python or Java class - it can have attributes
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
 type User struct {
 	Username      string
 	PasswordHash  []byte
-	SymEncKeyUser []byte              // User's Symmetric Encryption key, used to encrypt the user structure
-	PrivKeyMaster userlib.PKEDecKey   // User's Main Private key (decryption)
-	PubKeyMaster  userlib.PKEEncKey   // User's Main Public Key (encryption)
-	DigiSignSign  userlib.DSSignKey   // User's Digital Signature Signing key (private key)
-	DigiSignVeri  userlib.DSVerifyKey // User's Digital Signature Verifying key (public key)
-	Myfiles       map[string][]byte   // Files that the user created
-	SharedWithMe  map[string][]byte   // Files that shared with me
+	SymEncKeyUser []byte               // User's Symmetric Encryption key, used to encrypt the user structure
+	PrivKeyMaster userlib.PKEDecKey    // User's Main Private key (decryption)
+	PubKeyMaster  userlib.PKEEncKey    // User's Main Public Key (encryption)
+	DigiSignSign  userlib.DSSignKey    // User's Digital Signature Signing key (private key)
+	DigiSignVeri  userlib.DSVerifyKey  // User's Digital Signature Verifying key (public key)
+	Myfiles       map[string]uuid.UUID // Files that the user created
+	SharedWithMe  map[string]uuid.UUID // Files that shared with me
 	// You can add other attributes here if you want! But note that in order for attributes to
 	// Concatenate e fileHeader to the beginning of the content
 	// be included when this struct is serialized to/from JSON, they must be capitalized.
@@ -139,11 +178,10 @@ type User struct {
 }
 
 type FileMeta struct {
-	Filename   string
 	FileArray  []userlib.UUID
-	FileEncKey []byte
-	Owner      string  // The owner of the File
-	SharedWith *string // The Tree Structure of the sharing tree
+	FileEncKey [][]byte
+	Owner      string       // The owner of the File
+	SharedWith userlib.UUID // The Tree Structure of the sharing tree
 }
 
 type File struct {
@@ -192,8 +230,8 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	}
 
 	userlib.DebugMsg("InitUser >> Initializing Map Structures\n")
-	userdata.Myfiles = make(map[string][]byte)
-	userdata.SharedWithMe = make(map[string][]byte)
+	userdata.Myfiles = make(map[string]uuid.UUID)
+	userdata.SharedWithMe = make(map[string]uuid.UUID)
 
 	userlib.DebugMsg("InitUser >> Converting Userdata into Bytes\n")
 	userStructPlain, err := json.Marshal(userdata)
@@ -287,6 +325,7 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 	// Check if the User has already had the file
+	filename = filename + "/" + userdata.Username
 	_, ok := userdata.Myfiles[filename]
 	// TODO: File overwrite logic here
 	if ok {
@@ -297,28 +336,17 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		return
 	}
 
-	// Encrypt Files
-	userlib.DebugMsg("StoreFile >> Running File Content Creation\n")
-	symKey := userlib.RandomBytes(16) // Generate Symmetric encrytion key for Files
-	contentEnc := userlib.SymEnc(symKey, userlib.RandomBytes(16), content)
-	// Sign the Files
-	sum, err := userlib.HMACEval(symKey, contentEnc)
-	contentEncSigned := append(contentEnc, sum...)
+	fileUUID, symKey, err := encSignUploadFile(content)
 	if err != nil {
-		userlib.DebugMsg("StoreFile !! Cannot sign content!\n")
+		userlib.DebugMsg("StoreFile >> Cannot Upload file to Datastore!\n")
 		return err
 	}
-	// upload file to Datastore
-	fileUUID := uuid.New()
-	userlib.DatastoreSet(fileUUID, contentEncSigned)
-
 	userlib.DebugMsg("StoreFile >> Create File Metadata\n")
 	// Create File Metadata
 	var newFileMeta FileMeta
 
-	newFileMeta.Filename = filename
 	newFileMeta.FileArray = append(newFileMeta.FileArray, fileUUID)
-	newFileMeta.FileEncKey = symKey
+	newFileMeta.FileEncKey = append(newFileMeta.FileEncKey, symKey)
 	newFileMeta.Owner = userdata.Username
 
 	// upload metadata
@@ -353,7 +381,7 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 
 	// Update the userdata
 	userlib.DebugMsg("StoreFile >> Update Userdata\n")
-	userdata.Myfiles[filename] = symKeyMeta
+	userdata.Myfiles[filename] = metaUUID
 	newUserdataByteEnc, err := marshalEncrypt(userdata, userdata.SymEncKeyUser)
 	if err != nil {
 		userlib.DebugMsg("Store File !! Cannot marshalEncrypt newUserdataByteEnc!\n")
@@ -376,6 +404,68 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 }
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
+	filename = filename + "/" + userdata.Username
+	fileMetaUUID := userdata.Myfiles[filename] // get the uuid for fileMeta Structure
+	// TODO: deal with the SharedWithMe
+
+	// Get and Verify and Decrypt and Unmarshal fileMeta
+	userlib.DebugMsg("AppendToFile >> Get and Verify and Decrypt and Unmarshal fileMeta\n")
+	fileMetaEncSigned, ok := userlib.DatastoreGet(fileMetaUUID)
+	if !ok {
+		userlib.DebugMsg("AppendToFile !! Cannot get fileMeta\n ")
+		return nil
+	}
+	userlib.DebugMsg("AppendToFile >> Detach Verify\n")
+	fileMetaEnc, err := detachVerify(fileMetaEncSigned, userdata.DigiSignVeri)
+	if err != nil {
+		userlib.DebugMsg("AppendToFile !! Cannot detachVerify!\n")
+		return err
+	}
+	userlib.DebugMsg("AppendToFile >> Marshal fileMetaUUID and PubKeyMaster\n")
+	fileMetaUUIDMarshaled, err := json.Marshal(fileMetaUUID)
+	PubKeyMasterMarshaled, err := json.Marshal(userdata.PubKeyMaster)
+	if err != nil {
+		userlib.DebugMsg("AppendToFile !! Cannot marshal FileMetaUUID!\n")
+		return err
+	}
+	userlib.DebugMsg("AppendToFile >> Calculate HashKDF of new file\n")
+	symKeyMeta, err := userlib.HashKDF(PubKeyMasterMarshaled[:16], fileMetaUUIDMarshaled)
+	if err != nil {
+		userlib.DebugMsg("AppendToFile !! Cannot generate symKeyMeta!\n")
+		return err
+	}
+	fileMeta, err := decryptUnmarshal(fileMetaEnc, symKeyMeta[:16])
+	if err != nil {
+		userlib.DebugMsg("AppendToFile !! Cannot decryptUnmarshal FileMetaEnc!\n")
+		return err
+	}
+
+	// Create new file to DataStore
+	userlib.DebugMsg("AppendToFile >> Create new file to DataStore\n")
+	fileUUID, symKey, err := encSignUploadFile(content)
+	if err != nil {
+		userlib.DebugMsg("AppendToFile !! Cannot upload file to Datastore!\n")
+		return err
+	}
+
+	// Adding file data to fileMeta
+	fileMeta.FileEncKey = append(fileMeta.FileEncKey, symKey)
+	fileMeta.FileArray = append(fileMeta.FileArray, fileUUID)
+
+	// Encrypt, Sign and Upload the fileMeta
+	newFileMetaEnc, err := marshalEncrypt(fileMeta, symKeyMeta[:16])
+	if err != nil {
+		userlib.DebugMsg("AppendToFile !! Cannot marshalEncrypt fileMeta!\n")
+		return err
+	}
+	newFileMetaEncSigned, err := signAppend(newFileMetaEnc, userdata.DigiSignSign)
+	if err != nil {
+		userlib.DebugMsg("AppendToFile !! Cannot signAppend newFileMetaEnc!\n")
+		return err
+	}
+	userlib.DatastoreSet(fileMetaUUID, newFileMetaEncSigned)
+
+	userlib.DebugMsg("AppendToFile >> Execution Complete <<")
 	return nil
 }
 
