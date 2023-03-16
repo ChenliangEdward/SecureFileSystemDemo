@@ -12,9 +12,6 @@ import (
 	"github.com/google/uuid"
 	// hex.EncodeToString(...) is useful for converting []byte to string
 
-	// Useful for string manipulation
-	"strings"
-
 	// Useful for formatting strings (e.g. `fmt.Sprintf`).
 	"fmt"
 
@@ -155,6 +152,69 @@ func encSignUploadFile(content []byte) (fileUUID uuid.UUID, symKey []byte, err e
 	return fileUUID, symKey, err
 }
 
+func DownloadVeriDecFile(fileUUID uuid.UUID, symKey []byte) (content []byte, err error) {
+	// download file from DataStore
+	contentEncSigned, ok := userlib.DatastoreGet(fileUUID)
+	if !ok {
+		userlib.DebugMsg("Cannot get contentEncSigned from DataStore!\n")
+		return nil, nil
+	}
+	// Verify the Files
+	sig := contentEncSigned[len(contentEncSigned)-64:]        // get the last 64 bytes
+	contentEnc := contentEncSigned[:len(contentEncSigned)-64] // get the elements except for the last 64 bytes
+	sumVerify, err := userlib.HMACEval(symKey, contentEnc)
+	if err != nil {
+		userlib.DebugMsg("DownloadVeriDecFile !! Cannot HMACEval contentEnc!\n")
+		return nil, err
+	}
+	isEqual := userlib.HMACEqual(sumVerify, sig)
+	if !isEqual {
+		userlib.DebugMsg("DownloadVeriDecFile !! Cannot Verify File Signature!\n")
+		return nil, nil
+	}
+	content = userlib.SymDec(symKey, contentEnc)
+	return content, err
+}
+
+func getFileMetaData(filename string, userdata *User) (fileMeta FileMeta, fileMetaUUID uuid.UUID, symKeyMeta []byte, err error) {
+	filename = filename + "/" + userdata.Username
+	fileMetaUUID = userdata.Myfiles[filename] // get the uuid for fileMeta Structure
+
+	// Get and Verify and Decrypt and Unmarshal fileMeta
+	fileMetaEncSigned, ok := userlib.DatastoreGet(fileMetaUUID)
+	if !ok {
+		userlib.DebugMsg("getFileMetaData !! Cannot get fileMeta\n ")
+		return FileMeta{}, uuid.UUID{}, nil, nil
+	}
+
+	fileMetaEnc, err := detachVerify(fileMetaEncSigned, userdata.DigiSignVeri)
+	if err != nil {
+		userlib.DebugMsg("getFileMetaData !! Cannot detachVerify!\n")
+		return FileMeta{}, uuid.UUID{}, nil, err
+	}
+
+	fileMetaUUIDMarshaled, err := json.Marshal(fileMetaUUID)
+	PubKeyMasterMarshaled, err := json.Marshal(userdata.PubKeyMaster)
+	if err != nil {
+		userlib.DebugMsg("getFileMetaData !! Cannot marshal FileMetaUUID!\n")
+		return FileMeta{}, uuid.UUID{}, nil, err
+	}
+
+	symKeyMeta, err = userlib.HashKDF(PubKeyMasterMarshaled[:16], fileMetaUUIDMarshaled)
+	if err != nil {
+		userlib.DebugMsg("getFileMetaData !! Cannot generate symKeyMeta!\n")
+		return FileMeta{}, uuid.UUID{}, nil, err
+	}
+
+	fileMeta, err = decryptUnmarshal(fileMetaEnc, symKeyMeta[:16])
+	if err != nil {
+		userlib.DebugMsg("getFileMetaData !! Cannot decryptUnmarshal FileMetaEnc!\n")
+		return FileMeta{}, uuid.UUID{}, nil, err
+	}
+
+	return fileMeta, fileMetaUUID, symKeyMeta, nil
+}
+
 // User This is the type definition for the User struct.
 // A Go struct is like a Python or Java class - it can have attributes
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
@@ -193,13 +253,13 @@ type File struct {
 // NOTE: The following methods have toy (insecure!) implementations.
 
 func InitUser(username string, password string) (userdataptr *User, err error) {
-	userlib.DebugMsg("InitUser >> Generating uuid from username\n")
+	//userlib.DebugMsg("InitUser >> Generating uuid from username\n")
 	userUuid, err := uuid.FromBytes(userlib.Hash([]byte(username))[:16])
 	if err != nil {
 		userlib.DebugMsg("InitUser !! Cannot generate uuid from username\n")
 		return nil, err
 	}
-	userlib.DebugMsg("InitUser >> checking existing uuid\n")
+	//userlib.DebugMsg("InitUser >> checking existing uuid\n")
 	_, check := userlib.DatastoreGet(userUuid)
 	if check == true {
 		userlib.DebugMsg("InitUser !! UUID Exists!\n")
@@ -207,14 +267,14 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	} // if user exists, abort
 
 	var userdata User
-	userlib.DebugMsg("InitUser >> Initializng User Structure\n")
+	//userlib.DebugMsg("InitUser >> Initializng User Structure\n")
 	userdata.Username = username
-	userlib.DebugMsg("InitUser >> Hashing user password\n")
+	//userlib.DebugMsg("InitUser >> Hashing user password\n")
 	userdata.PasswordHash = userlib.Hash([]byte(password))
-	userlib.DebugMsg("InitUser >> Generating SEK for User Structure\n")
+	//userlib.DebugMsg("InitUser >> Generating SEK for User Structure\n")
 	userdata.SymEncKeyUser = userlib.Argon2Key([]byte(password), []byte(username), 16)
 
-	userlib.DebugMsg("InitUser >> Generating Master Pub Priv Keypair\n")
+	//userlib.DebugMsg("InitUser >> Generating Master Pub Priv Keypair\n")
 	userdata.PubKeyMaster.KeyType = "PubKey"
 	userdata.PrivKeyMaster.KeyType = "PrivKey"
 	userdata.PubKeyMaster, userdata.PrivKeyMaster, err = userlib.PKEKeyGen()
@@ -222,45 +282,45 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 		userlib.DebugMsg("InitUser !! Cannot generate Pub Priv Keypair\n")
 		return nil, err
 	}
-	userlib.DebugMsg("InitUser >> Generating Digital Signature Keys\n")
+	//userlib.DebugMsg("InitUser >> Generating Digital Signature Keys\n")
 	userdata.DigiSignSign, userdata.DigiSignVeri, err = userlib.DSKeyGen()
 	if err != nil {
 		userlib.DebugMsg("InitUser !! Cannot generate Digital Signature Keypairs!\n")
 		return nil, err
 	}
 
-	userlib.DebugMsg("InitUser >> Initializing Map Structures\n")
+	//userlib.DebugMsg("InitUser >> Initializing Map Structures\n")
 	userdata.Myfiles = make(map[string]uuid.UUID)
 	userdata.SharedWithMe = make(map[string]uuid.UUID)
 
-	userlib.DebugMsg("InitUser >> Converting Userdata into Bytes\n")
+	//userlib.DebugMsg("InitUser >> Converting Userdata into Bytes\n")
 	userStructPlain, err := json.Marshal(userdata)
 	if err != nil {
 		userlib.DebugMsg("Init User !! Cannot conver Userdata into Bytes\n")
 		return nil, err
 	}
 
-	userlib.DebugMsg("InitUser >> Encrypting user struct with SEK\n")
+	//userlib.DebugMsg("InitUser >> Encrypting user struct with SEK\n")
 	userStructEnc := userlib.SymEnc(userdata.SymEncKeyUser, userlib.RandomBytes(16), userStructPlain)
 	// This is the struct that goes to the DataStore
-	userlib.DebugMsg("InitUser >> Signing User struct\n")
+	//userlib.DebugMsg("InitUser >> Signing User struct\n")
 	userStructSig, err := userlib.DSSign(userdata.DigiSignSign, userStructEnc)
 	if err != nil {
 		userlib.DebugMsg("InitUser !! Signing user struct failed\n")
 		return nil, err
 	}
 
-	userlib.DebugMsg("InitUser >> Uploading user Struct to Datastore\n")
+	//userlib.DebugMsg("InitUser >> Uploading user Struct to Datastore\n")
 	userlib.DatastoreSet(userUuid, append(userStructEnc, userStructSig...))
 
-	userlib.DebugMsg("InitUser >> Uploading DS keys to Keystore\n")
+	//userlib.DebugMsg("InitUser >> Uploading DS keys to Keystore\n")
 	err = userlib.KeystoreSet(username+"DS", userdata.DigiSignVeri)
 	if err != nil {
 		userlib.DebugMsg("InitUser !! Uploading to Keystore Failed!\n")
 		return nil, err
 	}
 
-	userlib.DebugMsg("InitUser >> Uploading PK keys to Keystore\n")
+	//userlib.DebugMsg("InitUser >> Uploading PK keys to Keystore\n")
 	err = userlib.KeystoreSet(username+"PK", userdata.PubKeyMaster)
 	if err != nil {
 		userlib.DebugMsg("InitUser !! Uploading PK keys to Keystore failed!\n")
@@ -273,30 +333,30 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 
 func GetUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
-	userlib.DebugMsg("GetUser >> Getting UUID from username\n")
+	//userlib.DebugMsg("GetUser >> Getting UUID from username\n")
 	userUuid, err := uuid.FromBytes(userlib.Hash([]byte(username))[:16])
 	if err != nil {
 		userlib.DebugMsg("GetUser !! Cannot compute UUID from username\n")
 		return nil, err
 	}
-	userlib.DebugMsg("GetUser >> Getting Sign&Enc userdata from Datastore\n")
+	//userlib.DebugMsg("GetUser >> Getting Sign&Enc userdata from Datastore\n")
 	userdataEncSigned, check := userlib.DatastoreGet(userUuid)
 	if check == false {
 		userlib.DebugMsg("GetUser !! Cannot get userdata from Datastore!\n")
 		return nil, err
 	}
 
-	userlib.DebugMsg("GetUser >> Get the Digital Signature Verification Key from KeyStore\n")
+	//userlib.DebugMsg("GetUser >> Get the Digital Signature Verification Key from KeyStore\n")
 	digiSignVeri, check := userlib.KeystoreGet(username + "DS") // Get the digital signature verification key
 	if check == false {
 		userlib.DebugMsg("GetUser !! Cannot retrieve user's signature verification key!\n")
 		return nil, err
 	}
-	userlib.DebugMsg("GetUser >> Splitting the userdata to get Enc and Signature\n")
+	//userlib.DebugMsg("GetUser >> Splitting the userdata to get Enc and Signature\n")
 	userStructSig := userdataEncSigned[len(userdataEncSigned)-256 : len(userdataEncSigned)] // Get the last 256 bit signature
 	userStructEnc := userdataEncSigned[0 : len(userdataEncSigned)-256]                      // Get the Encrypted Data structure part
 
-	userlib.DebugMsg("GetUser >> Verify the user signature\n")
+	//userlib.DebugMsg("GetUser >> Verify the user signature\n")
 	err = userlib.DSVerify(digiSignVeri, userStructEnc, userStructSig)
 	if err != nil {
 		userlib.DebugMsg("GetUser !! Signature verification failed\n")
@@ -319,7 +379,7 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	}
 
 	userdataptr = &userdata
-	userlib.DebugMsg("GetUser >> GetUser Execution Successful\n")
+	userlib.DebugMsg("GetUser >> GetUser Execution Successful <<\n")
 	return userdataptr, nil
 }
 
@@ -338,10 +398,10 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 
 	fileUUID, symKey, err := encSignUploadFile(content)
 	if err != nil {
-		userlib.DebugMsg("StoreFile >> Cannot Upload file to Datastore!\n")
+		userlib.DebugMsg("StoreFile !! Cannot Upload file to Datastore!\n")
 		return err
 	}
-	userlib.DebugMsg("StoreFile >> Create File Metadata\n")
+	//userlib.DebugMsg("StoreFile >> Create File Metadata\n")
 	// Create File Metadata
 	var newFileMeta FileMeta
 
@@ -380,7 +440,7 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 	userlib.DatastoreSet(metaUUID, newFileMetaEncSigned)
 
 	// Update the userdata
-	userlib.DebugMsg("StoreFile >> Update Userdata\n")
+	//userlib.DebugMsg("StoreFile >> Update Userdata\n")
 	userdata.Myfiles[filename] = metaUUID
 	newUserdataByteEnc, err := marshalEncrypt(userdata, userdata.SymEncKeyUser)
 	if err != nil {
@@ -404,44 +464,14 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 }
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
-	filename = filename + "/" + userdata.Username
-	fileMetaUUID := userdata.Myfiles[filename] // get the uuid for fileMeta Structure
-	// TODO: deal with the SharedWithMe
-
-	// Get and Verify and Decrypt and Unmarshal fileMeta
-	userlib.DebugMsg("AppendToFile >> Get and Verify and Decrypt and Unmarshal fileMeta\n")
-	fileMetaEncSigned, ok := userlib.DatastoreGet(fileMetaUUID)
-	if !ok {
-		userlib.DebugMsg("AppendToFile !! Cannot get fileMeta\n ")
-		return nil
-	}
-	userlib.DebugMsg("AppendToFile >> Detach Verify\n")
-	fileMetaEnc, err := detachVerify(fileMetaEncSigned, userdata.DigiSignVeri)
+	fileMeta, fileMetaUUID, symKeyMeta, err := getFileMetaData(filename, userdata)
 	if err != nil {
-		userlib.DebugMsg("AppendToFile !! Cannot detachVerify!\n")
-		return err
-	}
-	userlib.DebugMsg("AppendToFile >> Marshal fileMetaUUID and PubKeyMaster\n")
-	fileMetaUUIDMarshaled, err := json.Marshal(fileMetaUUID)
-	PubKeyMasterMarshaled, err := json.Marshal(userdata.PubKeyMaster)
-	if err != nil {
-		userlib.DebugMsg("AppendToFile !! Cannot marshal FileMetaUUID!\n")
-		return err
-	}
-	userlib.DebugMsg("AppendToFile >> Calculate HashKDF of new file\n")
-	symKeyMeta, err := userlib.HashKDF(PubKeyMasterMarshaled[:16], fileMetaUUIDMarshaled)
-	if err != nil {
-		userlib.DebugMsg("AppendToFile !! Cannot generate symKeyMeta!\n")
-		return err
-	}
-	fileMeta, err := decryptUnmarshal(fileMetaEnc, symKeyMeta[:16])
-	if err != nil {
-		userlib.DebugMsg("AppendToFile !! Cannot decryptUnmarshal FileMetaEnc!\n")
+		userlib.DebugMsg("AppendToFile !! Cannot Get FileMeta!\n")
 		return err
 	}
 
 	// Create new file to DataStore
-	userlib.DebugMsg("AppendToFile >> Create new file to DataStore\n")
+	//userlib.DebugMsg("AppendToFile >> Create new file to DataStore\n")
 	fileUUID, symKey, err := encSignUploadFile(content)
 	if err != nil {
 		userlib.DebugMsg("AppendToFile !! Cannot upload file to Datastore!\n")
@@ -470,15 +500,21 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 }
 
 func (userdata *User) LoadFile(filename string) (content []byte, err error) {
-	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
+	fileMeta, _, _, err := getFileMetaData(filename, userdata)
 	if err != nil {
+		userlib.DebugMsg("AppendToFile !! Cannot Get FileMeta!\n")
 		return nil, err
 	}
-	dataJSON, ok := userlib.DatastoreGet(storageKey)
-	if !ok {
-		return nil, errors.New(strings.ToTitle("file not found"))
+	for idx, fileUUID := range fileMeta.FileArray {
+		symKey := fileMeta.FileEncKey[idx]
+		contentSegment, err := DownloadVeriDecFile(fileUUID, symKey)
+		if err != nil {
+			userlib.DebugMsg("LoadFile !! DownloadVeriDecFile failed!\n")
+			return nil, err
+		}
+		content = append(content, contentSegment...)
 	}
-	err = json.Unmarshal(dataJSON, &content)
+	userlib.DebugMsg("LoadFile >> Execution Complete <<")
 	return content, err
 }
 
