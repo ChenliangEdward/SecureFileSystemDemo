@@ -152,6 +152,23 @@ func encSignUploadFile(content []byte) (fileUUID uuid.UUID, symKey []byte, err e
 	return fileUUID, symKey, err
 }
 
+//func detachVerifyMac(contentEncSigned []byte, symKey []byte) (contentEnc []byte, err error) {
+//	sig := contentEncSigned[len(contentEncSigned)-64:]        // get the last 64 bytes
+//	contentEnc = contentEncSigned[:len(contentEncSigned)-64] // get the elements except for the last 64 bytes
+//	sumVerify, err := userlib.HMACEval(symKey, contentEnc)
+//	if err != nil {
+//		userlib.DebugMsg("DownloadVeriDecFile !! Cannot HMACEval contentEnc!\n")
+//		return nil, err
+//	}
+//	isEqual := userlib.HMACEqual(sumVerify, sig)
+//	if !isEqual {
+//		userlib.DebugMsg("DownloadVeriDecFile !! Cannot Verify File Signature!\n")
+//		return nil, nil
+//	}
+//	return contentEnc, nil
+//
+//}
+
 func DownloadVeriDecFile(fileUUID uuid.UUID, symKey []byte) (content []byte, err error) {
 	// download file from DataStore
 	contentEncSigned, ok := userlib.DatastoreGet(fileUUID)
@@ -178,7 +195,65 @@ func DownloadVeriDecFile(fileUUID uuid.UUID, symKey []byte) (content []byte, err
 
 func getFileMetaData(filename string, userdata *User) (fileMeta FileMeta, fileMetaUUID uuid.UUID, symKeyMeta []byte, err error) {
 	filename = filename + "/" + userdata.Username
-	fileMetaUUID = userdata.Myfiles[filename] // get the uuid for fileMeta Structure
+	_, ok1 := userdata.Myfiles[filename] // get the uuid for fileMeta Structure
+	_, ok2 := userdata.SharedWithMe[filename]
+	var pubKeyMaster userlib.PKEEncKey
+	var digiSignVeri userlib.DSVerifyKey
+	if ok1 && !ok2 {
+		fileMetaUUID = userdata.Myfiles[filename]
+		pubKeyMaster = userdata.PubKeyMaster
+		digiSignVeri = userdata.DigiSignVeri
+	} else if ok2 && !ok1 {
+		invitationUUID := userdata.SharedWithMe[filename]
+		var pubKeyByte []byte
+		pubKeyByte, err = json.Marshal(userdata.PubKeyMaster)
+		if err != nil {
+			userlib.DebugMsg("getFileMetaData !! Cannot Marshal userdata.PubKeyMaster!\n")
+			return FileMeta{}, uuid.UUID{}, nil, err
+		}
+		var invitMarshaledEnc []byte
+		invitMarshaledEnc, err = DownloadVeriDecFile(invitationUUID, pubKeyByte) // verify integrity of digital envelop
+		if err != nil {
+			userlib.DebugMsg("fileMetaUUIDMyfile !! Cannot get DigitalEnvelop!\n")
+			return FileMeta{}, uuid.UUID{}, nil, err
+		}
+
+		// Decrypt Invitation
+		var invitMarshaled []byte
+		invitMarshaled, err = userlib.PKEDec(userdata.PrivKeyMaster, invitMarshaledEnc)
+		if err != nil {
+			userlib.DebugMsg("fileMetaUUIDMyfile !! Cannot Decrypt contentMarshaled!\n")
+			return FileMeta{}, uuid.UUID{}, nil, err
+		}
+		var invitation Invitation
+		err = json.Unmarshal(invitMarshaled, &invitation)
+		if err != nil {
+			userlib.DebugMsg("fileMetaUUIDMyfile !! Cannot unmarshal invitation!\n")
+			return FileMeta{}, uuid.UUID{}, nil, err
+		}
+
+		// Get invitation data
+		fileOwner := invitation.FileOwner
+		fileMetaUUID = invitation.FileMetaLocation
+		var ok bool
+		pubKeyMaster, ok = userlib.KeystoreGet(fileOwner + "PK") // Get owner's public key
+		if !ok {
+			userlib.DebugMsg("getFileMetaData !! Cannot get Owner Public Key!\n")
+			return FileMeta{}, uuid.UUID{}, nil, nil
+		}
+		digiSignVeri, ok = userlib.KeystoreGet(fileOwner + "DS")
+		if !ok {
+			userlib.DebugMsg("getFileMetaData !! Cannot Get file owner's DSverifyKey!\n")
+			return FileMeta{}, uuid.UUID{}, nil, err
+		}
+
+	} else if !ok1 && !ok2 {
+		userlib.DebugMsg("getFileMetaData !! Cannot find in either Myfiles or SharedWith me!\n")
+		return FileMeta{}, uuid.UUID{}, nil, nil
+	} else if ok1 && ok2 {
+		userlib.DebugMsg("getFileMetaData !! Same filenames appeared in Myfiles and SharedWith me!\n")
+		return FileMeta{}, uuid.UUID{}, nil, nil
+	}
 
 	// Get and Verify and Decrypt and Unmarshal fileMeta
 	fileMetaEncSigned, ok := userlib.DatastoreGet(fileMetaUUID)
@@ -187,26 +262,30 @@ func getFileMetaData(filename string, userdata *User) (fileMeta FileMeta, fileMe
 		return FileMeta{}, uuid.UUID{}, nil, nil
 	}
 
-	fileMetaEnc, err := detachVerify(fileMetaEncSigned, userdata.DigiSignVeri)
+	fileMetaEnc, err := detachVerify(fileMetaEncSigned, digiSignVeri)
 	if err != nil {
 		userlib.DebugMsg("getFileMetaData !! Cannot detachVerify!\n")
 		return FileMeta{}, uuid.UUID{}, nil, err
 	}
 
 	fileMetaUUIDMarshaled, err := json.Marshal(fileMetaUUID)
-	PubKeyMasterMarshaled, err := json.Marshal(userdata.PubKeyMaster)
 	if err != nil {
 		userlib.DebugMsg("getFileMetaData !! Cannot marshal FileMetaUUID!\n")
 		return FileMeta{}, uuid.UUID{}, nil, err
 	}
+	PubKeyMasterMarshaled, err := json.Marshal(pubKeyMaster)
+	if err != nil {
+		userlib.DebugMsg("getFileMetaData !! Cannot marshal pubKeyMaster!\n")
+		return FileMeta{}, uuid.UUID{}, nil, err
+	}
 
-	symKeyMeta, err = userlib.HashKDF(PubKeyMasterMarshaled[:16], fileMetaUUIDMarshaled)
+	symKeyMeta, err = userlib.HashKDF(PubKeyMasterMarshaled[:16], fileMetaUUIDMarshaled) // calculate symKeyMeta
 	if err != nil {
 		userlib.DebugMsg("getFileMetaData !! Cannot generate symKeyMeta!\n")
 		return FileMeta{}, uuid.UUID{}, nil, err
 	}
 
-	fileMeta, err = decryptUnmarshal(fileMetaEnc, symKeyMeta[:16])
+	fileMeta, err = decryptUnmarshal(fileMetaEnc, symKeyMeta[:16]) // decrypt the fileMeta
 	if err != nil {
 		userlib.DebugMsg("getFileMetaData !! Cannot decryptUnmarshal FileMetaEnc!\n")
 		return FileMeta{}, uuid.UUID{}, nil, err
@@ -237,11 +316,15 @@ type User struct {
 	// begins with a lowercase letter).
 }
 
+type Invitation struct {
+	FileMetaLocation userlib.UUID
+	FileOwner        string
+}
 type FileMeta struct {
-	FileArray  []userlib.UUID
-	FileEncKey [][]byte
-	Owner      string       // The owner of the File
-	SharedWith userlib.UUID // The Tree Structure of the sharing tree
+	FileArray   []userlib.UUID
+	FileEncKey  [][]byte
+	Owner       string         // The owner of the File
+	Invitations []userlib.UUID // The Tree Structure of the sharing tree
 }
 
 type File struct {
@@ -520,6 +603,23 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 
 func (userdata *User) CreateInvitation(filename string, recipientUsername string) (
 	invitationPtr uuid.UUID, err error) {
+	//// Determine if the file belongs to me.
+	//fileMeta, metaUUID, symKeyMeta, err := getFileMetaData(filename, userdata)
+	//if !ok {
+	//	metaUUID, ok = userdata.SharedWithMe[filename]
+	//	if !ok {
+	//		userlib.DebugMsg("CreateInvitation !! Cannot get the file to create invitation!\n")
+	//		return uuid.UUID{}, err
+	//	}
+	//	// TODO: Logic for files that shared with me
+	//}
+	//
+	//// Get the fileMeta
+	//// Get the recipient PublicKey
+	//// EncSignUpload the invitation
+	////
+	//
+	//return
 	return
 }
 
