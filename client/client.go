@@ -298,33 +298,33 @@ func getFileMetaData(filename string, userdata *User) (fileMeta FileMeta, fileMe
 // A Go struct is like a Python or Java class - it can have attributes
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
 type User struct {
-	Username      string
-	PasswordHash  []byte
-	SymEncKeyUser []byte               // User's Symmetric Encryption key, used to encrypt the user structure
-	PrivKeyMaster userlib.PKEDecKey    // User's Main Private key (decryption)
-	PubKeyMaster  userlib.PKEEncKey    // User's Main Public Key (encryption)
-	DigiSignSign  userlib.DSSignKey    // User's Digital Signature Signing key (private key)
-	DigiSignVeri  userlib.DSVerifyKey  // User's Digital Signature Verifying key (public key)
-	Myfiles       map[string]uuid.UUID // Files that the user created
-	SharedWithMe  map[string]uuid.UUID // Files that shared with me
-	// You can add other attributes here if you want! But note that in order for attributes to
-	// Concatenate e fileHeader to the beginning of the content
-	// be included when this struct is serialized to/from JSON, they must be capitalized.
-	// On the flipside, if you have an attribute that you want to be able to access from
-	// this struct's methods, but you DON'T want that value to be included in the serialized value
-	// of this struct that's stored in datastore, then you can use a "private" variable (e.g. one that
-	// begins with a lowercase letter).
+	Username            string
+	PasswordHash        []byte
+	SymEncKeyUser       []byte               // User's Symmetric Encryption key, used to encrypt the user structure
+	PrivKeyMaster       userlib.PKEDecKey    // User's Main Private key (decryption)
+	PubKeyMaster        userlib.PKEEncKey    // User's Main Public Key (encryption)
+	DigiSignSign        userlib.DSSignKey    // User's Digital Signature Signing key (private key)
+	DigiSignVeri        userlib.DSVerifyKey  // User's Digital Signature Verifying key (public key)
+	Myfiles             map[string]uuid.UUID // Files that the user created
+	SharedWithMe        map[string]uuid.UUID // Files that shared with me
+	SharedWithMeDecKeys map[string][]byte
+}
+type Envelop struct {
+	FileMetaLocation uuid.UUID
+	FileOwner        string
 }
 
 type Invitation struct {
-	FileMetaLocation userlib.UUID
-	FileOwner        string
+	EnvelopLocation userlib.UUID
+	decKey          []byte
+	FileOwner       string
 }
 type FileMeta struct {
-	FileArray   []userlib.UUID
-	FileEncKey  [][]byte
-	Owner       string         // The owner of the File
-	Invitations []userlib.UUID // The Tree Structure of the sharing tree
+	FileArray      []userlib.UUID
+	FileEncKey     [][]byte
+	Owner          string
+	Envelops       map[string]userlib.UUID
+	EnvelopDecKeys map[string][]byte
 }
 
 type File struct {
@@ -603,23 +603,14 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 
 func (userdata *User) CreateInvitation(filename string, recipientUsername string) (
 	invitationPtr uuid.UUID, err error) {
-	//// Determine if the file belongs to me.
-	//fileMeta, metaUUID, symKeyMeta, err := getFileMetaData(filename, userdata)
-	//if !ok {
-	//	metaUUID, ok = userdata.SharedWithMe[filename]
-	//	if !ok {
-	//		userlib.DebugMsg("CreateInvitation !! Cannot get the file to create invitation!\n")
-	//		return uuid.UUID{}, err
-	//	}
-	//	// TODO: Logic for files that shared with me
-	//}
-	//
-	//// Get the fileMeta
-	//// Get the recipient PublicKey
-	//// EncSignUpload the invitation
-	////
-	//
-	//return
+	// Determine if the file belongs to me.
+	fileMetaUUID, isInMyFiles := userdata.Myfiles[filename+"/"+userdata.Username]
+	invitationToMe, isInSharedWithMe := userdata.SharedWithMe[filename+"/"+userdata.Username]
+	if isInMyFiles && !isInSharedWithMe {
+		// if I am the File Owner, download the File Metadata, create invitation and modify the file metadata
+	} else if isInSharedWithMe && !isInMyFiles {
+
+	}
 	return
 }
 
